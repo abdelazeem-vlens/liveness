@@ -1,19 +1,21 @@
 ```
 ├── datasets
-    └── RGB_Images
-        ├── org_1_80x60
-            ├── 0
-		├── aaa.png
-		├── bbb.png
-		└── ...
-            ├── 1
-		├── ddd.png
-		├── eee.png
-		└── ...
-            └── 2
-		├── ggg.png
-		├── hhh.png
-		└── ...
-        ├── 1_80x80
-        └── ...
+    ├── train
+        ├── 0                    # spoof
+            ├── aaa.png
+            ├── bbb.png
+            └── ...
+        └── 1                    # real
+            ├── ddd.png
+            ├── eee.png
+            └── ...
+    └── val
+        ├── 0                    # spoof
+            ├── ggg.png
+            ├── hhh.png
+            └── ...
+        └── 1                    # real
+            ├── iii.png
+            ├── jjj.png
+            └── ...
 ```
