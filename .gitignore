@@ -219,6 +219,5 @@ __marimo__/
 
 
 
-# data_dirs
-datasets/train
-datasets/val
+datasets/
+saved_logs/

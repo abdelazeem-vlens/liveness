@@ -245,7 +245,7 @@ def main():
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate anti-spoofing model")
     p.add_argument("--model_path", type=str, required=True, help="path to best.pth")
-    p.add_argument("--test_root", type=str, required=True,
+    p.add_argument("--test_root", type=str, default="datasets/test",
                    help="test set root (ImageFolder: 0=spoof, 1=real)")
     # must match training
     p.add_argument("--backbone", type=str, default="mobilenet_v3_large",
