@@ -37,6 +37,8 @@ def parse_args():
     parser.add_argument("--warmup_epochs", type=int, default=2)
     parser.add_argument("--scheduler", type=str, default="cosine",
                         choices=["cosine", "multistep"])
+    parser.add_argument("--resume", type=str, default=None,
+                        help="path to a last.pth/best.pth to resume training from")
     parser.add_argument("--train_root", type=str, default="./datasets/train")
     parser.add_argument("--val_root", type=str, default="./datasets/val")
     args = parser.parse_args()

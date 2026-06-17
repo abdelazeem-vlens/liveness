@@ -20,6 +20,7 @@ from tensorboardX import SummaryWriter
 from sklearn.metrics import roc_auc_score
 
 from src.logger import setup_logger
+from src.metrics import binary_metrics
 from src.model_lib.MultiFTNet import MultiFTNet
 from src.data_io.dataset_loader import get_train_loader, get_val_loader
 
@@ -63,7 +64,37 @@ class TrainMain:
     # ------------------------------------------------------------------ #
     def train_model(self):
         self._init_optimizer()
+        if self.conf.get("resume"):
+            self._load_checkpoint(self.conf.resume)
         self._train_stage()
+
+    def _load_checkpoint(self, path):
+        """Restore weights, optimizer, scheduler and bookkeeping to resume."""
+        ckpt = torch.load(path, map_location=self.conf.device)
+        if not isinstance(ckpt, dict) or "model" not in ckpt:
+            raise ValueError(
+                "Checkpoint '{}' is not a resumable checkpoint (missing "
+                "optimizer/scheduler state). Resume from a 'last.pth' / 'best.pth' "
+                "produced by this training script.".format(path))
+
+        state = {k[7:] if k.startswith("module.") else k: v
+                 for k, v in ckpt["model"].items()}
+        self.model.module.load_state_dict(state, strict=True)
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.schedule_lr.load_state_dict(ckpt["scheduler"])
+
+        self.start_epoch = ckpt["epoch"] + 1
+        self.step = ckpt.get("step", 0)
+        self.best_auc = ckpt.get("best_auc", -1.0)
+        self.best_epoch = ckpt.get("best_epoch", -1)
+
+        self.log.info("=" * 70)
+        self.log.info("RESUMED from %s", path)
+        self.log.info("  continuing at epoch %d | step %d | prev best AUC %.4f (epoch %d)",
+                      self.start_epoch, self.step, self.best_auc, self.best_epoch)
+        self.log.info("  resumed lr: %s",
+                      [round(x, 6) for x in self.schedule_lr.get_last_lr()])
+        self.log.info("=" * 70)
 
     def _define_network(self):
         net = MultiFTNet(
@@ -195,8 +226,13 @@ class TrainMain:
             self.schedule_lr.step()
 
             # ---- validation + checkpointing (per epoch) ----
-            auc = self._evaluate()
+            auc, vm = self._evaluate()
             self.writer.add_scalar("Val/AUC", auc, e)
+            self.writer.add_scalar("Val/Precision", vm["precision"], e)
+            self.writer.add_scalar("Val/Recall", vm["recall_tpr"], e)
+            self.writer.add_scalar("Val/F1", vm["f1"], e)
+            self.writer.add_scalar("Val/FAR", vm["far"], e)
+            self.writer.add_scalar("Val/FRR", vm["frr"], e)
 
             denom = max(1, ep_batches)
             self.log.info(
@@ -204,12 +240,17 @@ class TrainMain:
                 "train_acc: %.4f | val_AUC: %.4f",
                 e, ep_loss / denom, ep_cls / denom, ep_ft / denom,
                 ep_acc / denom, auc)
+            self.log.info(
+                "           val @0.5 | precision: %.4f recall: %.4f F1: %.4f | "
+                "FAR: %.4f FRR: %.4f | acc: %.4f",
+                vm["precision"], vm["recall_tpr"], vm["f1"],
+                vm["far"], vm["frr"], vm["accuracy"])
 
-            self._save_state("last")
+            self._save_state("last", e)
             if auc > self.best_auc:
                 self.best_auc = auc
                 self.best_epoch = e
-                self._save_state("best")
+                self._save_state("best", e)
                 self.log.info("  -> new best val AUC %.4f at epoch %d (saved best.pth)",
                               auc, e)
 
@@ -252,13 +293,25 @@ class TrainMain:
         scores = torch.cat(all_scores).numpy()
         labels = torch.cat(all_labels).numpy()
         bin_labels = (labels == self.conf.real_label).astype(int)
-        return roc_auc_score(bin_labels, scores)
+        auc = roc_auc_score(bin_labels, scores)
+        metrics = binary_metrics(bin_labels, scores, 0.5)
+        return auc, metrics
 
     def _accuracy(self, output, target):
         pred = output.argmax(dim=1)
         return (pred == target).float().mean().item()
 
-    def _save_state(self, tag):
+    def _save_state(self, tag, epoch):
         path = os.path.join(self.conf.model_path, "{}.pth".format(tag))
-        # Save the unwrapped state_dict (no DataParallel 'module.' prefix).
-        torch.save(self.model.module.state_dict(), path)
+        # Full checkpoint: unwrapped weights (no DataParallel 'module.' prefix)
+        # plus everything needed to resume mid-schedule.
+        ckpt = {
+            "model": self.model.module.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.schedule_lr.state_dict(),
+            "epoch": epoch,
+            "step": self.step,
+            "best_auc": self.best_auc,
+            "best_epoch": self.best_epoch,
+        }
+        torch.save(ckpt, path)

@@ -76,6 +76,7 @@ def update_config(args, conf):
     conf.use_discriminative_lr = not args.no_discriminative_lr
     conf.warmup_epochs = args.warmup_epochs
     conf.scheduler = args.scheduler
+    conf.resume = args.resume
     conf.train_root_path = args.train_root
     conf.val_root_path = args.val_root
     conf.tap_min_spatial = args.tap_min_spatial

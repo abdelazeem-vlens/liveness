@@ -28,66 +28,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix
+from sklearn.metrics import roc_auc_score, roc_curve
 
 from src.logger import setup_logger
+from src.metrics import compute_eer, tpr_at_fpr, binary_metrics
 from src.model_lib.MultiFTNet import MultiFTNet
 from src.data_io.dataset_folder import DatasetFolderVal
 from src.data_io.dataset_loader import _val_transform
-
-
-# --------------------------------------------------------------------------- #
-# Metrics
-# --------------------------------------------------------------------------- #
-def compute_eer(y_true, scores):
-    """Equal Error Rate and the threshold at which it occurs."""
-    fpr, tpr, thr = roc_curve(y_true, scores, pos_label=1)
-    # roc_curve prepends an infinite threshold; drop non-finite entries.
-    finite = np.isfinite(thr)
-    fpr, tpr, thr = fpr[finite], tpr[finite], thr[finite]
-    fnr = 1 - tpr
-    idx = int(np.nanargmin(np.abs(fnr - fpr)))
-    eer = float((fpr[idx] + fnr[idx]) / 2.0)
-    return eer, float(thr[idx])
-
-
-def tpr_at_fpr(y_true, scores, target_fpr):
-    """Highest TPR achievable while keeping FPR <= target_fpr."""
-    fpr, tpr, _ = roc_curve(y_true, scores, pos_label=1)
-    mask = fpr <= target_fpr
-    return float(tpr[mask].max()) if mask.any() else 0.0
-
-
-def metrics_at_threshold(y_true, scores, threshold):
-    """
-    All point metrics at a given decision threshold (score >= thr -> real=1).
-    positive class = real(1); attack/spoof = 0.
-    """
-    y_pred = (scores >= threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
-
-    eps = 1e-12
-    accuracy = (tp + tn) / (tp + tn + fp + fn + eps)
-    precision = tp / (tp + fp + eps)
-    recall = tp / (tp + fn + eps)            # TPR
-    specificity = tn / (tn + fp + eps)       # TNR
-    f1 = 2 * precision * recall / (precision + recall + eps)
-
-    # ISO/IEC 30107-3 presentation-attack metrics
-    apcer = fp / (fp + tn + eps)             # attacks accepted as bona fide
-    bpcer = fn / (fn + tp + eps)             # bona fide rejected as attack
-    acer = (apcer + bpcer) / 2.0
-    hter = (apcer + bpcer) / 2.0             # == ACER at this threshold
-
-    return {
-        "threshold": float(threshold),
-        "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
-        "accuracy": float(accuracy), "precision": float(precision),
-        "recall_tpr": float(recall), "specificity_tnr": float(specificity),
-        "f1": float(f1), "apcer": float(apcer), "bpcer": float(bpcer),
-        "acer": float(acer), "hter": float(hter),
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +50,9 @@ def build_model(args, device):
         img_channel=3,
     )
     state = torch.load(args.model_path, map_location=device)
+    # checkpoints are now full dicts {model, optimizer, ...}; accept bare ones too
+    if isinstance(state, dict) and "model" in state:
+        state = state["model"]
     # tolerate both bare and DataParallel-prefixed checkpoints
     state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
     model.load_state_dict(state, strict=True)
@@ -134,6 +84,7 @@ def log_block(log, name, m):
              m["tn"], m["fp"], m["fn"], m["tp"])
     log.info("      accuracy=%.4f  precision=%.4f  recall/TPR=%.4f  specificity/TNR=%.4f  F1=%.4f",
              m["accuracy"], m["precision"], m["recall_tpr"], m["specificity_tnr"], m["f1"])
+    log.info("      FAR=%.4f  FRR=%.4f", m["far"], m["frr"])
     log.info("      APCER=%.4f  BPCER=%.4f  ACER=%.4f  HTER=%.4f",
              m["apcer"], m["bpcer"], m["acer"], m["hter"])
 
@@ -217,10 +168,10 @@ def main():
     # threshold-dependent
     log.info("-" * 70)
     log.info("Point metrics:")
-    log_block(log, "thr=0.50", metrics_at_threshold(y_true, scores, 0.5))
-    log_block(log, "thr=EER ", metrics_at_threshold(y_true, scores, eer_thr))
+    log_block(log, "thr=0.50", binary_metrics(y_true, scores, 0.5))
+    log_block(log, "thr=EER ", binary_metrics(y_true, scores, eer_thr))
     if args.threshold is not None:
-        log_block(log, "thr=user", metrics_at_threshold(y_true, scores, args.threshold))
+        log_block(log, "thr=user", binary_metrics(y_true, scores, args.threshold))
 
     # per-image predictions
     if args.save_predictions:
@@ -245,7 +196,7 @@ def main():
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate anti-spoofing model")
     p.add_argument("--model_path", type=str, required=True, help="path to best.pth")
-    p.add_argument("--test_root", type=str, default="datasets/test",
+    p.add_argument("--test_root", type=str, required=True,
                    help="test set root (ImageFolder: 0=spoof, 1=real)")
     # must match training
     p.add_argument("--backbone", type=str, default="mobilenet_v3_large",
